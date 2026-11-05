@@ -251,6 +251,72 @@ def s9_importar(pg, url, ok):
     ok("o equipamento novo foi gravado", pg.evaluate("async ()=> !!(await db.porIndice('equipamentos','patrimonio','PAT-NOVO-1'))"))
 
 
+# origem: sprint.md · Sprints 5, 7, 9 e 10 (parâmetros, gráficos, KPI no mapa, LGPD)
+@cenario
+def s10_config_e_graficos(pg, url, ok):
+    perfil(pg, url, "coordenadoria")
+    semear(pg, url)
+    ir(pg, url, "#/config", 1000)
+    ok("os parâmetros de custo aparecem", pg.locator("#par_valor_referencia_atendimento").count() == 1)
+    ok("o texto de privacidade aparece", "Privacidade" in pg.inner_text("main"))
+    pg.fill("#par_valor_referencia_atendimento", "200,00")
+    pg.click("#formParametros button[type=submit]"); pg.wait_for_timeout(900)
+    v = pg.evaluate("async ()=> (await db.get('parametros','valor_referencia_atendimento'))")
+    ok("o parâmetro foi gravado com a data", v and abs(v["valor"] - 200) < 0.01 and bool(v.get("alterado_em")))
+    ir(pg, url, "#/painel", 1500)
+    ok("o painel tem os gráficos em SVG", pg.locator("svg.eq-grafico").count() == 2)
+    ok("o KPI mostra a fórmula", "Fórmula" in (pg.get_attribute("#kpiPontos", "title") or ""))
+    pg.click("#kpiSemContrato"); pg.wait_for_timeout(1500)
+    ok("clicar no KPI abre o mapa filtrado", "#/mapa" in pg.url and pg.is_checked("#mfSemContrato"))
+    ok("RN09: o padrão de CPF é detectado", pg.evaluate("()=> temCPF('529.982.247-25')"))
+
+
+# origem: sprint.md · Sprint 9 (duas cópias alteradas em paralelo, mescladas sem duplicar)
+@cenario
+def s9_conflitos(pg, url, ok):
+    import json
+    perfil(pg, url, "coordenadoria")
+    semear(pg, url)
+    pacote = pg.evaluate("""async ()=>{ const p = await db.exportar(); const u = p.dados.unidades[0];
+        p.dados.unidades = [u]; p.dados.equipamentos = p.dados.equipamentos.filter(e=> e.unidade_id === u.id);
+        p.dados.equipamentos[0].nome = 'Nome alterado na unidade'; p.dados.equipamentos[0].atualizadoEm = '2099-01-01T00:00:00';
+        const local = await db.get('equipamentos', p.dados.equipamentos[0].id); await db.put('equipamentos', {...local, setor: 'Setor alterado na coordenadoria'});
+        return p; }""")
+    antes = pg.evaluate("async ()=> (await db.list('equipamentos')).length")
+    arq = TMP / "unidade.json"; arq.write_text(json.dumps(pacote, ensure_ascii=False), encoding="utf-8")
+    ir(pg, url, "#/importar", 1000)
+    pg.set_input_files("#arqUnidade", str(arq)); pg.wait_for_timeout(1500)
+    ok("a tela de conflitos mostra o campo de cada lado", pg.locator("#tabelaConflitos tr").count() >= 3)
+    pg.check("#tabelaConflitos input[name$='_setor'][value=local]")
+    pg.click("#btnMesclar"); pg.wait_for_timeout(1500)
+    eq = pg.evaluate(f"async ()=> await db.get('equipamentos', '{pacote['dados']['equipamentos'][0]['id']}')")
+    ok("nenhum equipamento duplicado", pg.evaluate("async ()=> (await db.list('equipamentos')).length") == antes)
+    ok("o nome veio do arquivo (mais novo)", eq["nome"] == "Nome alterado na unidade")
+    ok("o setor escolhido na tela ficou o da coordenadoria", eq["setor"] == "Setor alterado na coordenadoria")
+
+
+# origem: sprint.md · Sprint 8 (o .kmz abre no Google Earth: KML válido no esquema OGC 2.2, com a foto no balão)
+@cenario
+def s8_kml_valido(pg, url, ok):
+    import io, zipfile
+    from lxml import etree
+    perfil(pg, url, "coordenadoria")
+    semear(pg, url)
+    pg.evaluate("""async ()=>{ const c = document.createElement('canvas'); c.width = c.height = 8;
+      const blob = await new Promise(r=> c.toBlob(r, 'image/jpeg'));
+      const e = (await db.list('equipamentos'))[0]; await db.put('arquivos', {id: 'fototeste-mini', blob});
+      await db.put('equipamentos', {...e, foto_ids: ['fototeste']}); }""")
+    ir(pg, url, "#/exportar", 1200)
+    with pg.expect_download() as d:
+        pg.click("#btnKmz")
+    arq = TMP / "teste.kmz"; d.value.save_as(arq)
+    z = zipfile.ZipFile(arq)
+    kml = z.read("doc.kml")
+    ok("o .kmz leva a foto e o balão aponta para ela", "fotos/fototeste.jpg" in z.namelist() and b'<img src="fotos/fototeste.jpg"' in kml)
+    xsd = etree.XMLSchema(etree.parse(str(PASTA / "testes" / "xsd" / "ogckml22.xsd")))
+    ok("o doc.kml é válido no esquema OGC KML 2.2", xsd.validate(etree.parse(io.BytesIO(kml))))
+
+
 def main():
     erro = False
     with sync_playwright() as p:
